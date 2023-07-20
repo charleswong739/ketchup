@@ -1,0 +1,29 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[[source]]
+url = "https://download.pytorch.org/whl/nightly/cu117"
+verify_ssl = true
+name = "torch"
+
+[packages]
+numpy = "*"
+tqdm = "*"
+torch = {version="*", index="torch"}
+transformers = "*"
+datasets = "*"
+torchvision = {version="*", index="torch"}
+torchaudio = {version="*", index="torch"}
+nltk = "*"
+rouge-score = "*"
+"discord.py" = "*"
+
+[dev-packages]
+
+[requires]
+python_version = "3.10"
+
+[pipenv]
+allow_prereleases = true
