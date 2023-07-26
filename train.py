@@ -1,6 +1,9 @@
+from math import ceil
+
 import torch
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
+from torch.cuda.amp import autocast, GradScaler
 
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, get_scheduler
@@ -9,9 +12,9 @@ from tqdm import trange, tqdm
 
 from rouge_score import rouge_scorer
 
-from pprint import pprint
-
 from cfg import MODEL_CHECKPOINT, SAVE_FILE, MAX_INPUT_LENGTH, MAX_OUTPUT_LENGTH
+
+import matplotlib.pyplot as plt
 
 MODEL = None
 TOKENIZER = None
@@ -68,10 +71,22 @@ if __name__ == '__main__':
     val_dl = DataLoader(preprocess_data(val_data), batch_size=BATCH_SIZE, num_workers=2,
                         pin_memory=gpu)
 
+    accumulation_steps = 8
     num_training_steps = NUM_EPOCHS * len(train_dl)
+    num_optimizer_steps = ceil(num_training_steps / accumulation_steps)
+    num_warmup_steps = num_optimizer_steps // 100
+    num_winddown = num_optimizer_steps - num_warmup_steps
     optimizer = AdamW(MODEL.parameters(), lr=LEARNING_RATE)
     lr_scheduler = get_scheduler(name="linear", optimizer=optimizer,
-                                 num_warmup_steps=0, num_training_steps=num_training_steps)
+                                 num_warmup_steps=num_warmup_steps, num_training_steps=num_winddown)
+    scaler = GradScaler()
+
+
+    # DATA
+    learning_rate = []
+    validation_score = []
+    loss_data = []
+
 
     scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
 
@@ -86,15 +101,23 @@ if __name__ == '__main__':
                       position=1, dynamic_ncols=True) as it:
 
                 # train
-                for batch in train_dl:
+                for i, batch in enumerate(train_dl):
                     batch = {k: v.to(device) for k, v in batch.items()}
-                    outputs = MODEL(**batch)
-                    loss = outputs.loss
-                    loss.backward()
 
-                    optimizer.step()
-                    lr_scheduler.step()
-                    optimizer.zero_grad()
+                    with autocast():
+                        outputs = MODEL(**batch)
+                        loss = outputs.loss / accumulation_steps
+
+                    learning_rate.append(lr_scheduler.get_last_lr())
+                    loss_data.append(loss.item())
+
+                    scaler.scale(loss).backward()
+                    if ((i + 1) % accumulation_steps == 0) or (i + 1 == len(train_dl)):
+                        scaler.step(optimizer)
+                        scaler.update()
+
+                        lr_scheduler.step()
+                        optimizer.zero_grad()
                     it.set_postfix(loss=loss.item())
                     it.update()
                     pbar.update()
@@ -122,8 +145,38 @@ if __name__ == '__main__':
 
             mean_rouge_score = total_rouge_score / examples
             tqdm.write(f"Mean ROUGE fmesaure after epoch {epoch}: {mean_rouge_score}")
+            validation_score.append(mean_rouge_score)
 
             if mean_rouge_score > best_rouge:
                 torch.save(MODEL.state_dict(), SAVE_FILE)
 
             pbar.bar_format = barfmt % epoch
+
+
+    # plot results
+    fig, ((ax1, ax2), (ax3, _)) = plt.subplots(2, 2)
+    save = False
+
+    training_steps = [x for x in range(1, num_training_steps + 1)]
+
+    ax1.plot(training_steps, learning_rate, "-")
+    ax1.set_xlabel("Training Step")
+    ax1.set_ylabel("Learning rate")
+
+    ax2.plot(training_steps, loss_data, "-")
+    ax2.set_xlabel("Training Step")
+    ax2.set_ylabel("Loss")
+
+    epochs = [x for x in range(1, NUM_EPOCHS + 1)]
+
+    ax2.plot(training_steps, loss.cpu(), "-")
+    ax2.set_xlabel("Epoch")
+    ax2.set_ylabel("Validation Score (Mean ROUGE-L F-measure)")
+
+    plt.suptitle("Ketchup Model Training Metrics")
+    plt.tight_layout()
+
+    if save:
+        plt.savefig("ketchup_training_metrics.png")
+
+    plt.show()

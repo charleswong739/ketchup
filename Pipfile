@@ -19,6 +19,8 @@ torchaudio = {version="*", index="torch"}
 nltk = "*"
 rouge-score = "*"
 "discord.py" = "*"
+python-dotenv = "*"
+matplotlib = "*"
 
 [dev-packages]
 
